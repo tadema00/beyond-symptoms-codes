@@ -1,0 +1,114 @@
+---
+title: "Beyond Symptoms: Clinical Epidemiology and Determinants of Health-Seeking Delay for Lassa Fever"
+author: "Tadema Ayokunle John"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+    theme: readable
+---
+
+
+knitr::opts_chunk$set(
+echo = TRUE,
+message = FALSE,
+warning = FALSE
+)
+
+%Load packages
+library(dplyr)
+library(tidyr)
+library(readr)
+library(stringr)
+library(gtsummary)
+library(broom)
+library(ggplot2)
+library(pROC)
+library(patchwork)
+library(scales)
+library(ggpubr)
+
+%data importation
+clinic_lassa <- read_csv("data/clinic_lassa.csv", show_col_types = FALSE)
+
+glimpse(clinic_lassa)
+cat("Dataset dimensions:", nrow(clinic_lassa), "rows,", ncol(clinic_lassa), "columns\n")
+
+%Feature Engineering and Cleaning
+
+data <- clinic_lassa %>%
+select(
+`Participant ID`, AGE_CATEG, SEX, TEMP, DUR_FEVER,
+starts_with("SYMP_"),
+SWOLLFACE,
+PCR_RESULT,
+SEVERITY
+) %>%
+rename(
+id = `Participant ID`,
+age_group = AGE_CATEG,
+sex = SEX,
+temperature = TEMP,
+fever_days = DUR_FEVER,
+pcr = PCR_RESULT,
+severity = SEVERITY
+) %>%
+mutate(
+pcr = factor(pcr, levels = c(0, 1), labels = c("Negative", "Positive")),
+severity = factor(severity, levels = c(0, 1), labels = c("Non-Severe", "Severe")),
+delayed_presentation = ifelse(fever_days >= 6, 1, 0)
+)
+
+%Descriptive Statistics
+tbl_summary(
+data,
+by = pcr,
+statistic = all_continuous() ~ "{mean} ({sd})",
+missing = "no"
+) %>%
+add_p()
+
+%Logistic Regression: PCR Confirmation
+model_pcr <- glm(
+pcr ~ age_group + sex + temperature + fever_days + delayed_presentation,
+data = data,
+family = binomial
+)
+
+summary(model_pcr)
+
+tidy(model_pcr, exponentiate = TRUE, conf.int = TRUE)
+
+%Severe Disease Model
+model_severe <- glm(
+severity ~ age_group + sex + fever_days + delayed_presentation,
+data = data,
+family = binomial
+)
+
+tidy(model_severe, exponentiate = TRUE, conf.int = TRUE)
+
+%ROC Curve and Model Performance
+
+roc_obj <- roc(data$pcr, fitted(model_pcr))
+
+plot(
+roc_obj,
+col = "blue",
+main = paste("ROC Curve (AUC =", round(auc(roc_obj), 3), ")")
+)
+
+%Visualisations
+ggplot(data, aes(fever_days, fill = pcr)) +
+geom_histogram(binwidth = 1, position = "dodge") +
+scale_fill_brewer(palette = "Set1") +
+labs(
+title = "Fever Duration by PCR Status",
+x = "Days of Fever",
+y = "Count"
+)
+
+sessionInfo()
+
