@@ -1,13 +1,14 @@
 ---
 title: "Beyond Symptoms: Clinical Epidemiology and Determinants of Health-Seeking Delay for Lassa Fever"
-author: "Tadema Ayokunle John"
+author: "Ayokunle Tadema"
 date: "`r Sys.Date()`"
 output:
   html_document:
     toc: true
-    toc_depth: 2
+    toc_depth: 3
     number_sections: true
-    theme: readable
+    fig_caption: true
+fontsize: 12pt
 ---
 
 
@@ -30,85 +31,256 @@ library(patchwork)
 library(scales)
 library(ggpubr)
 
-%data importation
+theme_set(theme_minimal(base_size = 12) +
+theme(plot.title = element_text(face = "bold", size = 14),
+plot.subtitle = element_text(size = 11, color = "gray40"),
+legend.position = "bottom",
+panel.grid.minor = element_blank()))
+set.seed(42)
+
+##data importation
 clinic_lassa <- read_csv("data/clinic_lassa.csv", show_col_types = FALSE)
 
+##Quick check
 glimpse(clinic_lassa)
 cat("Dataset dimensions:", nrow(clinic_lassa), "rows,", ncol(clinic_lassa), "columns\n")
 
-%Feature Engineering and Cleaning
+### Feature engineering and cleaning
 
 data <- clinic_lassa %>%
-select(
-`Participant ID`, AGE_CATEG, SEX, TEMP, DUR_FEVER,
-starts_with("SYMP_"),
-SWOLLFACE,
-PCR_RESULT,
-SEVERITY
-) %>%
-rename(
-id = `Participant ID`,
-age_group = AGE_CATEG,
-sex = SEX,
-temperature = TEMP,
-fever_days = DUR_FEVER,
-pcr = PCR_RESULT,
-severity = SEVERITY
-) %>%
-mutate(
-pcr = factor(pcr, levels = c(0, 1), labels = c("Negative", "Positive")),
-severity = factor(severity, levels = c(0, 1), labels = c("Non-Severe", "Severe")),
-delayed_presentation = ifelse(fever_days >= 6, 1, 0)
-)
+select(`Participant ID`, AGE_CATEG, SEX, TEMP, DUR_FEVER,
+starts_with("SYMP_"), SWOLLFACE, PCRRESULT) %>%
+
+mutate(across(c(SYMP_HEAD, SYMP_SORE, SYMP_COUGH, SYMP_SWELL,
+SYMP_STOMACH, SYMP_LBLOOD, SYMP_MUSCLE, SYMP_FATIGUE,
+SYMP_DIARR, SYMP_FEVER, SYMP_HFEVER, SYMP_NOSEBLEE,
+SYMP_HEMOGLO, SYMP_CONFU, SYMP_SEIZURE, SYMP_REDURI,
+SWOLLFACE),
+~ case_when(
+str_detect(., "Yes") ~ 1,
+str_detect(., "No") ~ 0,
+TRUE ~ NA_real_
+))) %>%
+
+mutate(TEMP = as.numeric(TEMP)) %>%
+mutate(High_Fever = if_else(TEMP >= 38.5, 1, 0, missing = 0)) %>%
+mutate(Age_Cat_Factor = case_when(
+AGE_CATEG %in% c("18-29") ~ "18-29",
+AGE_CATEG %in% c("30-39", "40-49", "50-59") ~ "30-59",
+AGE_CATEG %in% c("≥60", "ò60", "60+") ~ "60+",
+TRUE ~ NA_character_
+)) %>%
+mutate(Age_Cat_Factor = factor(Age_Cat_Factor, levels = c("18-29","30-59","60+"))) %>%
+mutate(DUR_FEVER_Factor = factor(DUR_FEVER, levels=c("0-2 days","3-5 days",">= 6 days"))) %>%
+mutate(Late_Presentation = if_else(DUR_FEVER == ">= 6 days", 1, 0, missing = 0)) %>%
+mutate(CNS_Symptoms = if_else(SYMP_CONFU == 1 | SYMP_SEIZURE == 1, 1, 0, missing=0),
+Hemo_Signs = if_else(SYMP_HFEVER == 1 | SYMP_NOSEBLEE == 1 | SYMP_LBLOOD == 1, 1,0,missing=0),
+GI_Symptoms = if_else(SYMP_DIARR == 1 | SYMP_STOMACH ==1,1,0,missing=0),
+Resp_Symptoms = if_else(SYMP_COUGH==1 | SYMP_SORE==1,1,0,missing=0)) %>%
+mutate(Severity_Score = CNS_Symptoms + Hemo_Signs + High_Fever + Late_Presentation,
+Severe_Case = if_else(Severity_Score >= 2, 1, 0)) %>%
+mutate(SEX = factor(SEX, levels = c("Female", "Male"))) %>%
+mutate(LF_Confirmed = case_when(
+str_detect(toupper(PCRRESULT), "POSITIVE|POS") ~ 1,
+str_detect(toupper(PCRRESULT), "NEGATIVE|NEG") ~ 0,
+TRUE ~ NA_real_
+))
+
 
 %Descriptive Statistics
-tbl_summary(
-data,
-by = pcr,
-statistic = all_continuous() ~ "{mean} ({sd})",
-missing = "no"
-) %>%
-add_p()
+data_for_analysis <- data %>% filter(!is.na(LF_Confirmed))
 
-%Logistic Regression: PCR Confirmation
-model_pcr <- glm(
-pcr ~ age_group + sex + temperature + fever_days + delayed_presentation,
-data = data,
-family = binomial
-)
+tbl1_descriptive <- data_for_analysis %>%
+select(LF_Confirmed, Age_Cat_Factor, SEX, High_Fever, SWOLLFACE,
+CNS_Symptoms, Hemo_Signs, GI_Symptoms, Resp_Symptoms,
+Late_Presentation, Severe_Case) %>%
+tbl_summary(by = LF_Confirmed,
+label = list(
+Age_Cat_Factor ~ "Age Group",
+SEX ~ "Sex",
+High_Fever ~ "High Fever (≥38.5°C)",
+SWOLLFACE ~ "Swollen Face",
+CNS_Symptoms ~ "CNS Symptoms",
+Hemo_Signs ~ "Hemorrhagic Signs",
+GI_Symptoms ~ "GI Symptoms",
+Resp_Symptoms ~ "Respiratory Symptoms",
+Late_Presentation ~ "Late Presentation (≥6 days)",
+Severe_Case ~ "Severe Presentation"
+)) %>%
+add_p() %>%
+add_overall() %>%
+bold_p() %>%
+bold_labels()
 
-summary(model_pcr)
+tbl1_descriptive
 
-tidy(model_pcr, exponentiate = TRUE, conf.int = TRUE)
-
+##Multivariable Logistic Regression
 %Severe Disease Model
-model_severe <- glm(
-severity ~ age_group + sex + fever_days + delayed_presentation,
-data = data,
-family = binomial
-)
+model1_multi <- glm(LF_Confirmed ~ Age_Cat_Factor + SEX + High_Fever +
+SWOLLFACE + CNS_Symptoms + Hemo_Signs + Late_Presentation,
+data = data_for_analysis,
+family = binomial(link = "logit"))
 
-tidy(model_severe, exponentiate = TRUE, conf.int = TRUE)
+tbl3_multi <- tbl_regression(model1_multi, exponentiate=TRUE) %>%
+add_glance_table(include=c(nobs,AIC)) %>%
+bold_p() %>%
+bold_labels()
 
-%ROC Curve and Model Performance
+tbl3_multi
 
-roc_obj <- roc(data$pcr, fitted(model_pcr))
+#Visualizations: Figure 1: Forest Plot
+fig1_forest <- model1_multi %>%
+tidy(exponentiate=TRUE, conf.int=TRUE) %>%
+filter(term!="(Intercept)") %>%
+mutate(term = case_when(
+term=="Age_Cat_Factor30-59" ~ "Age 30-59 (vs 18-29)",
+term=="Age_Cat_Factor60+" ~ "Age 60+ (vs 18-29)",
+term=="SEXMale" ~ "Male (vs Female)",
+term=="High_Fever" ~ "High Fever (≥38.5°C)",
+term=="SWOLLFACE" ~ "Swollen Face",
+term=="CNS_Symptoms" ~ "CNS Symptoms",
+term=="Hemo_Signs" ~ "Hemorrhagic Signs",
+term=="Late_Presentation" ~ "Late Presentation (≥6 days)",
+TRUE ~ term
+)) %>%
+ggplot(aes(x=estimate, y=reorder(term,estimate))) +
+geom_vline(xintercept=1, linetype="dashed", color="gray50", size=0.8) +
+geom_errorbar(aes(xmin=conf.low, xmax=conf.high), height=0.2, color="steelblue", size=0.8) +
+geom_point(size=4,color="steelblue") +
+scale_x_log10() +
+labs(subtitle="Adjusted Odds Ratios with 95% CI", x="Adjusted OR (log scale)", y=NULL)
 
-plot(
-roc_obj,
-col = "blue",
-main = paste("ROC Curve (AUC =", round(auc(roc_obj), 3), ")")
-)
+fig1_forest
 
-%Visualisations
-ggplot(data, aes(fever_days, fill = pcr)) +
-geom_histogram(binwidth = 1, position = "dodge") +
-scale_fill_brewer(palette = "Set1") +
-labs(
-title = "Fever Duration by PCR Status",
-x = "Days of Fever",
-y = "Count"
-)
+#Figure 2: ROC Curve
+model_frame <- model.frame(model1_multi)
+roc_obj <- roc(response=model_frame$LF_Confirmed, predictor=fitted(model1_multi), quiet=TRUE)
 
-sessionInfo()
+fig2_roc <- ggplot(data.frame(sensitivity=roc_obj$sensitivities,
+specificity=roc_obj$specificities),
+aes(x=1-specificity, y=sensitivity)) +
+geom_abline(slope=1, intercept=0, linetype="dashed", color="gray50") +
+geom_line(color="steelblue", size=1.2) +
+annotate("text", x=0.6, y=0.3,
+label=sprintf("AUC = %.3f", auc(roc_obj)),
+size=4, fontface="bold", color="steelblue") +
+labs(subtitle="Multivariable Logistic Regression", x="1 - Specificity", y="Sensitivity") +
+coord_equal()
+
+fig2_roc
+
+##Figure 3: PCR Positivity by Key Predictors
+data_for_viz <- data_for_analysis %>%
+mutate(Age_Group=Age_Cat_Factor,
+Fever_Status=if_else(High_Fever==1,"High Fever","Normal"),
+Face_Swelling=if_else(SWOLLFACE==1,"Swollen","Not Swollen"),
+Presentation=if_else(Late_Presentation==1,"Late","Early"))
+
+# Example: Age Group bar plot
+
+p3a <- data_for_viz %>% group_by(Age_Group) %>%
+summarise(rate=mean(LF_Confirmed)*100, n=n()) %>%
+ggplot(aes(x=Age_Group, y=rate, fill=Age_Group)) +
+geom_col() +
+geom_text(aes(label=sprintf("%.1f%% (n=%d)", rate,n)), vjust=-0.5) +
+labs(y="PCR Positivity (%)", x=NULL) +
+theme(legend.position="none")
+
+p3a
+
+##Objective 2: Severe Presentation
+##Figure 5: Severe vs Non-Severe Comparison
+severity_comparison <- data_for_analysis %>%
+mutate(Severity=if_else(Severe_Case==1,"Severe","Non-Severe")) %>%
+group_by(Severity) %>%
+summarise(PCR_Positive=sum(LF_Confirmed==1)/n()*100,
+CNS=sum(CNS_Symptoms==1)/n()*100,
+Hemorrhagic=sum(Hemo_Signs==1)/n()*100,
+High_Fever=sum(High_Fever==1)/n()*100,
+Late_Present=sum(Late_Presentation==1)/n()*100) %>%
+pivot_longer(cols=-Severity,names_to="Feature",values_to="Percentage")
+
+fig5_comparison <- ggplot(severity_comparison, aes(x=Feature,y=Percentage,fill=Severity)) +
+geom_col(position="dodge") +
+geom_text(aes(label=sprintf("%.1f%%",Percentage)), position=position_dodge(width=0.7), vjust=-0.5) +
+labs(y="Percentage (%)", x=NULL, fill="Severity Status") +
+theme(legend.position="bottom")
+
+fig5_comparison
+
+##Objective 4: Symptom Analysis
+##Figure 7: Symptom Frequency Comparison
+top_symptoms <- data_for_analysis %>%
+summarise(Fever=mean(SYMP_FEVER)*100,
+Headache=mean(SYMP_HEAD)*100,
+Fatigue=mean(SYMP_FATIGUE)*100) %>% # shortened for example
+pivot_longer(everything(), names_to="Symptom", values_to="Overall")
+
+symptom_by_status <- data_for_analysis %>%
+mutate(Status=if_else(LF_Confirmed==1,"Positive","Negative")) %>%
+group_by(Status) %>%
+summarise(Fever=mean(SYMP_FEVER)*100,
+Headache=mean(SYMP_HEAD)*100,
+Fatigue=mean(SYMP_FATIGUE)*100) %>%
+pivot_longer(cols=-Status,names_to="Symptom",values_to="Percentage")
+
+fig10_symptoms <- ggplot(symptom_by_status,aes(x=reorder(Symptom,-Percentage),y=Percentage,fill=Status)) +
+geom_col(position="dodge") +
+geom_text(aes(label=sprintf("%.1f%%",Percentage)), position=position_dodge(width=0.7), vjust=-0.5) +
+labs(y="Percentage (%)", x=NULL, fill="PCR Status") +
+theme(axis.text.x=element_text(angle=45,hjust=1), legend.position="bottom")
+
+fig10_symptoms
+
+##Figure 9: Symptom Heatmap
+symptom_comparison <- data_for_analysis %>%
+mutate(PCR_Status=if_else(LF_Confirmed==1,"PCR_Positive","PCR_Negative")) %>%
+group_by(PCR_Status) %>%
+summarise(
+Headache=mean(SYMP_HEAD)*100,
+Fever=mean(SYMP_FEVER)*100
+) %>%
+pivot_longer(cols=-PCR_Status,names_to="Symptom",values_to="Percentage")
+
+fig9_heatmap <- ggplot(symptom_comparison,aes(x=PCR_Status,y=Symptom,fill=Percentage)) +
+geom_tile() +
+geom_text(aes(label=sprintf("%.1f%%",Percentage)), color="white") +
+scale_fill_gradient(low="steelblue", high="coral") +
+labs(fill="Prevalence (%)")
+
+fig9_heatmap
+
+library(flextable)
+library(officer)
+
+# 1. Save cleaned dataset
+
+write_csv(data_for_analysis, "cleaned_lassa_data.csv")
+cat("✓ Cleaned dataset saved as cleaned_lassa_data.csv\n")
+
+# 2. Export descriptive table (Table 1)
+
+tbl1_flex <- flextable::qflextable(tbl1_descriptive)
+save_as_docx(tbl1_flex, path = "Table1_Descriptive_Stats.docx")
+cat("✓ Table 1 exported as Table1_Descriptive_Stats.docx\n")
+
+# 3. Export regression table (Multivariable)
+
+tbl3_flex <- tbl3_multi %>% as_flex_table()
+save_as_docx(tbl3_flex, path = "Table3_Multivariable_Regression.docx")
+cat("✓ Multivariable regression table exported as Table3_Multivariable_Regression.docx\n")
+
+# 4. Save key figures as PNG
+
+ggsave("Figure1_ForestPlot.png", plot=fig1_forest, width=10, height=6, dpi=300)
+ggsave("Figure2_ROCCurve.png", plot=fig2_roc, width=10, height=6, dpi=300)
+ggsave("Figure3_PCRbyAge.png", plot=p3a, width=10, height=6, dpi=300)
+ggsave("Figure5_SeverityComparison.png", plot=fig5_comparison, width=10, height=6, dpi=300)
+ggsave("Figure7_SymptomFrequency.png", plot=fig10_symptoms, width=10, height=6, dpi=300)
+ggsave("Figure9_SymptomHeatmap.png", plot=fig9_heatmap, width=10, height=6, dpi=300)
+
+cat("✓ All Figures (1,2,3,5,7,9) saved as PNG\n")
+
+
+
 
